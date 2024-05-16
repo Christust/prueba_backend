@@ -34,18 +34,28 @@ class MaestroViewSet(BaseModelViewSet):
         serializer_class = self.serializer_class(data=request.data)
         if serializer_class.is_valid():
             serializer_class.save()
+            maestro = self.get_object(serializer_class.data.get("id"))
+            if len(request.data["salones"]) > 3:
+                return Response(
+                    data={"msg": "No enviar mas de tres salones"},
+                    status=status.HTTP_406_NOT_ACCEPTABLE,
+                )
             for salon in request.data["salones"]:
+                salon["codigo"] = salon["id"]
+                salon["letra"] = salon["letra"] + salon["numero"]
                 salon_serializer = serializers.SalonSerializer(data=salon)
                 if salon_serializer.is_valid():
                     salon_serializer.save()
+                    new_salon = serializers.SalonSerializer.Meta.model.objects.filter(
+                        codigo=salon["id"]
+                    ).first()
+                    new_salon.maestro = maestro
+                    new_salon.save()
                 else:
-                    print("salon")
-                    print(salon_serializer.errors)
                     return Response(
                         data=salon_serializer.errors,
                         status=status.HTTP_406_NOT_ACCEPTABLE,
                     )
-            maestro = self.get_object(serializer_class.data.get("id"))
             maestro_out_serializer = self.serializer_class(maestro)
             return Response(
                 data=maestro_out_serializer.data, status=status.HTTP_201_CREATED
@@ -63,7 +73,14 @@ class MaestroViewSet(BaseModelViewSet):
             if self.out_serializer_class
             else self.serializer_class(searched_object)
         )
-        return Response(data=serializer_class.data, status=status.HTTP_200_OK)
+        response_data = serializer_class.data
+        if self.request.query_params.get("completo", False):
+            salones = serializers.SalonSerializer.Meta.model.objects.filter(
+                maestro=serializer_class.data["id"]
+            )
+            salones = serializers.SalonSerializer(salones, many=True)
+            response_data["salones"] = salones.data
+        return Response(data=response_data, status=status.HTTP_200_OK)
 
     def update(self, request, pk):
         searched_object = self.get_object(pk)
@@ -74,13 +91,74 @@ class MaestroViewSet(BaseModelViewSet):
         )
         if serializer_class.is_valid():
             serializer_class.save()
-            return Response(data=serializer_class.data, status=status.HTTP_202_ACCEPTED)
+            response_data = serializer_class.data
+
+            for salon in request.data["salones"]:
+                salon["codigo"] = salon["id"]
+                salon["letra"] = salon["letra"] + salon["numero"]
+                salon_exist = serializers.SalonSerializer.Meta.model.objects.filter(
+                    codigo=salon["id"]
+                ).first()
+                if salon_exist:
+                    print(int(pk, base=10))
+                    salon_exist.letra = salon["letra"]
+                    salon_exist.maestro = searched_object
+                    salon_exist.save()
+                    response_data["salones"] = serializers.SalonSerializer(
+                        salon_exist
+                    ).data
+
+                else:
+                    salon_serializer = serializers.SalonSerializer(data=salon)
+                    if salon_serializer.is_valid():
+                        salon_serializer.save()
+                        new_salon = (
+                            serializers.SalonSerializer.Meta.model.objects.filter(
+                                codigo=salon["id"]
+                            ).first()
+                        )
+                        new_salon.maestro = searched_object
+                        new_salon.save()
+                        response_data["salones"] = serializers.SalonSerializer(
+                            new_salon
+                        ).data
+                    else:
+                        return Response(
+                            data=salon_serializer.errors,
+                            status=status.HTTP_406_NOT_ACCEPTABLE,
+                        )
+            return Response(data=response_data, status=status.HTTP_202_ACCEPTED)
         return Response(
             data=serializer_class.errors, status=status.HTTP_400_BAD_REQUEST
         )
 
     def destroy(self, request, pk):
         searched_object = self.get_object(pk)
-        searched_object.is_active = False
-        searched_object.save()
+        searched_object.delete()
         return Response(data={"message": "Deleted"}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["get"])
+    def questions(self, request):
+        from django.db.models import Count
+
+        maestros = serializers.MaestroSerializer.Meta.model.objects.annotate(
+            num_salones=Count("salon")
+        ).order_by("-num_salones")
+        salones_count = serializers.SalonSerializer.Meta.model.objects.filter(
+            codigo="COD"
+        ).count()
+        sueldos_totales = 0
+        maestros_response = []
+        for maestro in maestros:
+            sueldos_totales += maestro.sueldo
+            maestros_response.append(
+                f"{maestro.nombre_completo} {maestro.num_salones} salones"
+            )
+
+        response_data = {
+            "sueldos_totales": sueldos_totales,
+            "salones_count": salones_count,
+            "maestros": maestros_response,
+        }
+
+        return Response(data=response_data, status=status.HTTP_200_OK)
